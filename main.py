@@ -91,6 +91,8 @@ async def _fetch_room_fans(sess: aiohttp.ClientSession, owner_uid: int) -> Dict[
         async with sess.get(url) as resp:
             data = await resp.json()
 
+        await asyncio.sleep(settings.REQUEST_INTERVAL_SECONDS)
+
         if data.get("code") != 0:
             logger.error("拉取粉丝牌失败，ruid=%s code=%s", owner_uid, data.get("code"))
             break
@@ -130,7 +132,6 @@ async def _refresh_fans_cache_forever():
                         owner_uid,
                         len(room_fans)
                     )
-                    await asyncio.sleep(settings.REQUEST_INTERVAL_SECONDS)
 
         except Exception as e:
             logger.error("粉丝牌缓存更新异常：%s", e)

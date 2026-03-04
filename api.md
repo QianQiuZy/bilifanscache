@@ -106,5 +106,5 @@ Base URL: `http://<host>:<port>`
 - 后台任务持续轮询所有房间：
   1. 按主播 UID 拉取分页粉丝牌数据；
   2. 更新对应 `room_id` 的内存缓存；
-  3. 等待 `REQUEST_INTERVAL_SECONDS`（默认 3 秒）后处理下一个房间；
+  3. 每次请求后等待 `REQUEST_INTERVAL_SECONDS`（默认 3 秒），确保请求级限频；
   4. 处理完全部房间后立即进入下一轮，不做分钟级额外等待。
