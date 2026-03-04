@@ -152,7 +152,14 @@ async def get_fans(
     """
     查询单个房间缓存。
     仅允许 room_id 或 uid 其中一个参数存在。
-    返回结构保持不变：{"fans_cache": {...}}
+    返回结构：
+    {
+      "code": 0,
+      "msg": "ok",
+      "uid": 主播uid,
+      "room_id": 房间号,
+      "medal": {...}
+    }
     """
     if (room_id is None and uid is None) or (room_id is not None and uid is not None):
         raise HTTPException(status_code=400, detail="room_id 和 uid 必须且只能传一个")
@@ -167,7 +174,14 @@ async def get_fans(
     if room_cache is None:
         raise HTTPException(status_code=503, detail="该房间粉丝牌缓存尚未初始化，请稍后重试")
 
-    return {"fans_cache": room_cache}
+    owner_uid = int(rooms_meta[room_id]["uid"])
+    return {
+        "code": 0,
+        "msg": "ok",
+        "uid": owner_uid,
+        "room_id": room_id,
+        "medal": room_cache
+    }
 
 
 @app.get("/search")

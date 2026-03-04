@@ -12,7 +12,7 @@
   - `GET /fans?room_id=`：按房间查询缓存。
   - `GET /fans?uid=`：按主播 UID 查询缓存。
   - `GET /search?uid=`：查询某个粉丝 UID 在所有缓存中的粉丝牌等级分布。
-- **返回兼容**：`/fans` 保持历史返回结构 `{"fans_cache": {...}}`。
+- **结构化返回**：`/fans` 返回 `code/msg/uid/room_id/medal`，便于客户端统一处理。
 
 ## 快速开始
 

@@ -23,7 +23,11 @@ Base URL: `http://<host>:<port>`
 
 ```json
 {
-  "fans_cache": {
+  "code": 0,
+  "msg": "ok",
+  "uid": 1048135385,
+  "room_id": 1820703922,
+  "medal": {
     "1048135385": 12,
     "123456789": 3
   }
@@ -31,7 +35,9 @@ Base URL: `http://<host>:<port>`
 ```
 
 说明：
-- `fans_cache` 的 key 为粉丝 UID（JSON 输出为字符串），value 为粉丝牌等级。
+- `uid` 为主播 UID（即房间所属主播）。
+- `room_id` 为命中的房间号。
+- `medal` 的 key 为粉丝 UID（JSON 输出为字符串），value 为粉丝牌等级。
 
 ### 失败响应
 
