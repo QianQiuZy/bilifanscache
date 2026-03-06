@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import aiohttp
+import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, Query
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -31,6 +32,11 @@ class Settings(BaseSettings):
     )
     ROOMS_JSON_PATH: str = "rooms.json"
     REQUEST_INTERVAL_SECONDS: int = 3
+    REDIS_HOST: str = "127.0.0.1"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 1
+    REDIS_PASSWORD: str = ""
+    REDIS_KEY_PREFIX: str = "bilifanscache"
 
 
 settings = Settings()
@@ -47,6 +53,7 @@ rooms_meta: Dict[int, Dict[str, object]] = {}
 owner_uid_to_room_id: Dict[int, int] = {}
 # room_id -> {粉丝uid: 粉丝牌等级}
 fans_cache_by_room: Dict[int, Dict[int, int]] = {}
+redis_client: Optional[redis.Redis] = None
 
 # 请求头
 HEADERS = {
@@ -75,6 +82,42 @@ def _load_rooms_config() -> Tuple[Dict[int, Dict[str, object]], Dict[int, int]]:
         owner_to_room_tmp[owner_uid] = room_id
 
     return room_meta_tmp, owner_to_room_tmp
+
+
+def _room_cache_key(room_id: int) -> str:
+    return f"{settings.REDIS_KEY_PREFIX}:room:{room_id}:fans"
+
+
+async def _save_room_cache_to_redis(room_id: int, room_fans: Dict[int, int]):
+    if redis_client is None:
+        return
+    payload = json.dumps(room_fans, ensure_ascii=False)
+    await redis_client.set(_room_cache_key(room_id), payload)
+
+
+async def _load_room_cache_from_redis(room_id: int) -> Optional[Dict[int, int]]:
+    if redis_client is None:
+        return None
+    raw = await redis_client.get(_room_cache_key(room_id))
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return {int(uid): int(level) for uid, level in parsed.items()}
+    except Exception as e:
+        logger.error("解析 Redis 房间缓存失败，room_id=%s err=%s", room_id, e)
+        return None
+
+
+async def _restore_cache_from_redis():
+    restored_cnt = 0
+    for room_id in rooms_meta:
+        room_cache = await _load_room_cache_from_redis(room_id)
+        if room_cache is None:
+            continue
+        fans_cache_by_room[room_id] = room_cache
+        restored_cnt += 1
+    logger.info("Redis 预热完成，已恢复 %s 个房间缓存", restored_cnt)
 
 
 async def _fetch_room_fans(sess: aiohttp.ClientSession, owner_uid: int) -> Dict[int, int]:
@@ -126,6 +169,7 @@ async def _refresh_fans_cache_forever():
                     owner_uid = int(meta["uid"])
                     room_fans = await _fetch_room_fans(sess=sess, owner_uid=owner_uid)
                     fans_cache_by_room[room_id] = room_fans
+                    await _save_room_cache_to_redis(room_id=room_id, room_fans=room_fans)
                     logger.info(
                         "粉丝牌缓存已更新，room_id=%s uid=%s 共 %s 条",
                         room_id,
@@ -140,9 +184,27 @@ async def _refresh_fans_cache_forever():
 
 @app.on_event("startup")
 async def startup_event():
-    global rooms_meta, owner_uid_to_room_id
+    global rooms_meta, owner_uid_to_room_id, redis_client
     rooms_meta, owner_uid_to_room_id = _load_rooms_config()
+
+    redis_password = settings.REDIS_PASSWORD or None
+    redis_client = redis.Redis(
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        db=settings.REDIS_DB,
+        password=redis_password,
+        decode_responses=True
+    )
+    await redis_client.ping()
+    await _restore_cache_from_redis()
+
     asyncio.create_task(_refresh_fans_cache_forever())
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if redis_client is not None:
+        await redis_client.aclose()
 
 
 @app.get("/fans")
@@ -173,7 +235,11 @@ async def get_fans(
     assert room_id is not None
     room_cache = fans_cache_by_room.get(room_id)
     if room_cache is None:
-        raise HTTPException(status_code=503, detail="该房间粉丝牌缓存尚未初始化，请稍后重试")
+        room_cache = await _load_room_cache_from_redis(room_id)
+        if room_cache is not None:
+            fans_cache_by_room[room_id] = room_cache
+        else:
+            raise HTTPException(status_code=503, detail="该房间粉丝牌缓存尚未初始化，请稍后重试")
 
     owner_uid = int(rooms_meta[room_id]["uid"])
     return {
