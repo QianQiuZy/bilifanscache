@@ -12,7 +12,7 @@
   - `GET /fans?room_id=`：按房间查询缓存。
   - `GET /fans?uid=`：按主播 UID 查询缓存。
   - `GET /search?uid=`：查询某个粉丝 UID 在所有缓存中的粉丝牌等级分布。
-- **结构化返回**：`/fans` 返回 `code/msg/uid/room_id/medal`，便于客户端统一处理。
+- **结构化返回**：`/fans` 返回 `code/msg/uid/room_id/medal/guard_level`，便于客户端统一处理。
 - **重启可恢复**：服务启动时会先从 Redis 预热缓存，减少冷启动空窗。
 
 ## 快速开始
@@ -68,8 +68,10 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 - 启动时读取 `rooms.json`，构建 `room_id -> 主播信息` 与 `uid -> room_id` 映射。
 - 启动时先从 Redis 加载已有缓存到内存。
 - Redis 中没有缓存的房间会由后台任务优先完成首次抓取，并写入内存与 Redis。
+- 粉丝团缓存与舰长缓存使用独立 Redis 键；舰长只保存非 0 的 `guard_level`（1/2/3）。
 - Uvicorn 会先完成服务启动；缺失房间补齐完成后，后台任务才切换到持续轮询全部房间。
 - 缺失房间补齐期间，尚未初始化的房间请求会返回 `503`。
+- 舰长 Redis 键尚未建立时返回 `guard_level: null`；只返回非 0 的舰长用户，若所有用户的 `guard_level` 都为 0 则返回 `"none"`。
 
 ## 注意事项
 

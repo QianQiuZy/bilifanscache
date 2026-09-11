@@ -30,6 +30,9 @@ Base URL: `http://<host>:<port>`
   "medal": {
     "1048135385": 12,
     "123456789": 3
+  },
+  "guard_level": {
+    "1048135385": 2
   }
 }
 ```
@@ -38,6 +41,9 @@ Base URL: `http://<host>:<port>`
 - `uid` 为主播 UID（即房间所属主播）。
 - `room_id` 为命中的房间号。
 - `medal` 的 key 为粉丝 UID（JSON 输出为字符串），value 为粉丝牌等级。
+- `guard_level` 只返回 `guard_level` 为 `1`、`2`、`3` 的粉丝 UID，不返回等级为 `0` 的用户。
+- 若所有用户的 `guard_level` 都为 `0`，直接返回 `"none"`。
+- 若粉丝团缓存已恢复但舰长 Redis 键尚未建立，`guard_level` 返回 `null`。
 
 ### 失败响应
 
@@ -89,6 +95,9 @@ Base URL: `http://<host>:<port>`
   "medal": {
     "小礼猫": 22,
     "酷萨": 21
+  },
+  "guard_level": {
+    "小礼猫": 2
   }
 }
 ```
@@ -97,6 +106,7 @@ Base URL: `http://<host>:<port>`
 - `medal` key 为 `rooms.json` 中配置的粉丝牌名称。
 - 若目标 UID 在某些房间不存在粉丝牌，不会出现在 `medal` 中。
 - 若目标 UID 在所有缓存中都不存在，`medal` 返回空对象 `{}`。
+- `guard_level` 只包含非零舰长等级对应的粉丝牌；舰长缓存未初始化时返回 `null`，若所有相关房间的等级都为 `0` 则返回 `"none"`。
 
 ---
 
@@ -104,6 +114,8 @@ Base URL: `http://<host>:<port>`
 
 - 服务启动后加载 `rooms.json`，再从 Redis 恢复已有房间缓存，并调度后台预热任务。
 - 后台任务首先只拉取 Redis 中没有缓存的房间；全部补齐后才切换到正常轮询。
+- 粉丝团使用 `bilifanscache:room:<room_id>:fans`，舰长使用独立的 `bilifanscache:room:<room_id>:guard_levels`。
+- 舰长缓存只持久化 `guard_level` 为 1/2/3 的用户，不持久化 0。
 - Uvicorn 的 `Application startup complete` 不代表所有缺失房间已经预热完成；预热期间未初始化房间仍返回 `503`。
 - 正常轮询所有房间：
   1. 按主播 UID 拉取分页粉丝牌数据；

@@ -53,6 +53,8 @@ rooms_meta: Dict[int, Dict[str, object]] = {}
 owner_uid_to_room_id: Dict[int, int] = {}
 # room_id -> {粉丝uid: 粉丝牌等级}
 fans_cache_by_room: Dict[int, Dict[int, int]] = {}
+# room_id -> {粉丝uid: 舰长等级}; None 表示 Redis 舰长键尚未初始化
+guard_cache_by_room: Dict[int, Optional[Dict[int, int]]] = {}
 redis_client: Optional[redis.Redis] = None
 
 # 请求头
@@ -88,6 +90,10 @@ def _room_cache_key(room_id: int) -> str:
     return f"{settings.REDIS_KEY_PREFIX}:room:{room_id}:fans"
 
 
+def _room_guard_cache_key(room_id: int) -> str:
+    return f"{settings.REDIS_KEY_PREFIX}:room:{room_id}:guard_levels"
+
+
 async def _save_room_cache_to_redis(room_id: int, room_fans: Dict[int, int]):
     if redis_client is None:
         return
@@ -109,18 +115,48 @@ async def _load_room_cache_from_redis(room_id: int) -> Optional[Dict[int, int]]:
         return None
 
 
+async def _save_room_guard_cache_to_redis(
+    room_id: int,
+    room_guards: Dict[int, int],
+):
+    if redis_client is None:
+        return
+    payload = json.dumps(room_guards, ensure_ascii=False)
+    await redis_client.set(_room_guard_cache_key(room_id), payload)
+
+
+async def _load_room_guard_cache_from_redis(
+    room_id: int,
+) -> Optional[Dict[int, int]]:
+    if redis_client is None:
+        return None
+    raw = await redis_client.get(_room_guard_cache_key(room_id))
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return {int(uid): int(level) for uid, level in parsed.items()}
+    except Exception as e:
+        logger.error("解析 Redis 舰长缓存失败，room_id=%s err=%s", room_id, e)
+        return None
+
+
 async def _restore_cache_from_redis():
     restored_cnt = 0
     for room_id in rooms_meta:
         room_cache = await _load_room_cache_from_redis(room_id)
-        if room_cache is None:
-            continue
-        fans_cache_by_room[room_id] = room_cache
-        restored_cnt += 1
+        if room_cache is not None:
+            fans_cache_by_room[room_id] = room_cache
+            restored_cnt += 1
+        guard_cache = await _load_room_guard_cache_from_redis(room_id)
+        guard_cache_by_room[room_id] = guard_cache
     logger.info("Redis 预热完成，已恢复 %s 个房间缓存", restored_cnt)
 
 
-async def _fetch_room_fans(sess: aiohttp.ClientSession, owner_uid: int) -> Dict[int, int]:
+async def _fetch_room_data(
+    sess: aiohttp.ClientSession,
+    owner_uid: int,
+) -> Tuple[Dict[int, int], Dict[int, int]]:
     url_tpl = (
         "https://api.live.bilibili.com/"
         "xlive/general-interface/v1/rank/getFansMembersRank"
@@ -128,6 +164,7 @@ async def _fetch_room_fans(sess: aiohttp.ClientSession, owner_uid: int) -> Dict[
     )
     page = 1
     room_fans: Dict[int, int] = {}
+    room_guards: Dict[int, int] = {}
 
     while True:
         url = url_tpl.format(page=page, ruid=owner_uid, ps=settings.PAGE_SIZE)
@@ -145,11 +182,18 @@ async def _fetch_room_fans(sess: aiohttp.ClientSession, owner_uid: int) -> Dict[
             break
 
         for it in items:
-            room_fans[int(it["uid"])] = int(it["level"])
+            fan_uid = int(it["uid"])
+            room_fans[fan_uid] = int(it["level"])
+            uinfo_medal = it.get("uinfo_medal")
+            if not isinstance(uinfo_medal, dict):
+                continue
+            guard_level = uinfo_medal.get("guard_level", 0)
+            if guard_level in (1, 2, 3):
+                room_guards[fan_uid] = int(guard_level)
 
         page += 1
 
-    return room_fans
+    return room_fans, room_guards
 
 
 async def _refresh_fans_cache_forever(initial_only: bool = False) -> None:
@@ -164,6 +208,7 @@ async def _refresh_fans_cache_forever(initial_only: bool = False) -> None:
     if warmup_only:
         missing_count = sum(
             room_id not in fans_cache_by_room
+            or guard_cache_by_room.get(room_id) is None
             for room_id in rooms_meta
         )
         logger.info("启动补齐开始，Redis 中缺少 %s 个房间缓存", missing_count)
@@ -177,12 +222,24 @@ async def _refresh_fans_cache_forever(initial_only: bool = False) -> None:
                 cookies={"SESSDATA": settings.SESSDATA}
             ) as sess:
                 for room_id, meta in rooms_meta.items():
-                    if warmup_only and room_id in fans_cache_by_room:
+                    if (
+                        warmup_only
+                        and room_id in fans_cache_by_room
+                        and guard_cache_by_room.get(room_id) is not None
+                    ):
                         continue
                     owner_uid = int(meta["uid"])
-                    room_fans = await _fetch_room_fans(sess=sess, owner_uid=owner_uid)
+                    room_fans, room_guards = await _fetch_room_data(
+                        sess=sess,
+                        owner_uid=owner_uid,
+                    )
                     fans_cache_by_room[room_id] = room_fans
+                    guard_cache_by_room[room_id] = room_guards
                     await _save_room_cache_to_redis(room_id=room_id, room_fans=room_fans)
+                    await _save_room_guard_cache_to_redis(
+                        room_id=room_id,
+                        room_guards=room_guards,
+                    )
                     logger.info(
                         "粉丝牌缓存已更新，room_id=%s uid=%s 共 %s 条",
                         room_id,
@@ -198,6 +255,28 @@ async def _refresh_fans_cache_forever(initial_only: bool = False) -> None:
         if warmup_only:
             logger.info("Redis 缺失房间补齐完成，开始正常轮询")
             warmup_only = False
+
+
+async def _get_room_guard_cache(room_id: int) -> Optional[Dict[int, int]]:
+    if room_id in guard_cache_by_room:
+        return guard_cache_by_room[room_id]
+    guard_cache = await _load_room_guard_cache_from_redis(room_id)
+    guard_cache_by_room[room_id] = guard_cache
+    return guard_cache
+
+
+def _build_guard_levels(
+    room_fans: Dict[int, int],
+    room_guards: Optional[Dict[int, int]],
+) -> Dict[int, int] | str | None:
+    if room_guards is None:
+        return None
+    guard_levels = {
+        fan_uid: guard_level
+        for fan_uid, guard_level in room_guards.items()
+        if fan_uid in room_fans and guard_level in (1, 2, 3)
+    }
+    return guard_levels or "none"
 
 
 @app.on_event("startup")
@@ -238,7 +317,8 @@ async def get_fans(
       "msg": "ok",
       "uid": 主播uid,
       "room_id": 房间号,
-      "medal": {...}
+      "medal": {...},
+      "guard_level": {...} | "none" | null
     }
     """
     if (room_id is None and uid is None) or (room_id is not None and uid is not None):
@@ -258,13 +338,15 @@ async def get_fans(
         else:
             raise HTTPException(status_code=503, detail="该房间粉丝牌缓存尚未初始化，请稍后重试")
 
+    guard_cache = await _get_room_guard_cache(room_id)
     owner_uid = int(rooms_meta[room_id]["uid"])
     return {
         "code": 0,
         "msg": "ok",
         "uid": owner_uid,
         "room_id": room_id,
-        "medal": room_cache
+        "medal": room_cache,
+        "guard_level": _build_guard_levels(room_cache, guard_cache),
     }
 
 
@@ -277,10 +359,13 @@ async def search_uid(uid: int = Query(...)):
       "code": 0,
       "msg": "ok",
       "uid": 123,
-      "medal": {"粉丝牌名": 22}
+      "medal": {"粉丝牌名": 22},
+      "guard_level": {"粉丝牌名": 2}
     }
     """
     medal_map: Dict[str, int] = {}
+    guard_level_map: Dict[str, int] = {}
+    has_uninitialized_guard_cache = False
 
     for room_id, room_cache in fans_cache_by_room.items():
         level = room_cache.get(uid)
@@ -288,10 +373,24 @@ async def search_uid(uid: int = Query(...)):
             continue
         medal_name = str(rooms_meta.get(room_id, {}).get("medal", room_id))
         medal_map[medal_name] = level
+        guard_cache = await _get_room_guard_cache(room_id)
+        if guard_cache is None:
+            has_uninitialized_guard_cache = True
+            continue
+        guard_level = guard_cache.get(uid)
+        if guard_level in (1, 2, 3):
+            guard_level_map[medal_name] = guard_level
+
+    guard_levels: Dict[str, int] | str | None
+    if has_uninitialized_guard_cache:
+        guard_levels = None
+    else:
+        guard_levels = guard_level_map or "none"
 
     return {
         "code": 0,
         "msg": "ok",
         "uid": uid,
-        "medal": medal_map
+        "medal": medal_map,
+        "guard_level": guard_levels,
     }
