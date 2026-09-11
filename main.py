@@ -152,10 +152,13 @@ async def _fetch_room_fans(sess: aiohttp.ClientSession, owner_uid: int) -> Dict[
     return room_fans
 
 
-async def _refresh_fans_cache_forever():
+async def _refresh_fans_cache_forever(initial_only: bool = False) -> None:
     """
     后台任务：轮询 rooms.json 内所有主播 uid，持续刷新内存缓存。
     每次请求间隔 3 秒，不再按分钟间隔批量刷新。
+
+    启动阶段传入 ``initial_only=True`` 时，只补齐 Redis 中没有的房间，
+    补齐完成后返回；正常轮询则继续处理全部房间。
     """
     while True:
         try:
@@ -166,6 +169,8 @@ async def _refresh_fans_cache_forever():
                 cookies={"SESSDATA": settings.SESSDATA}
             ) as sess:
                 for room_id, meta in rooms_meta.items():
+                    if initial_only and room_id in fans_cache_by_room:
+                        continue
                     owner_uid = int(meta["uid"])
                     room_fans = await _fetch_room_fans(sess=sess, owner_uid=owner_uid)
                     fans_cache_by_room[room_id] = room_fans
@@ -180,6 +185,11 @@ async def _refresh_fans_cache_forever():
         except Exception as e:
             logger.error("粉丝牌缓存更新异常：%s", e)
             await asyncio.sleep(settings.REQUEST_INTERVAL_SECONDS)
+            continue
+
+        if initial_only:
+            logger.info("Redis 缺失房间补齐完成，开始正常轮询")
+            return
 
 
 @app.on_event("startup")
@@ -197,6 +207,7 @@ async def startup_event():
     )
     await redis_client.ping()
     await _restore_cache_from_redis()
+    await _refresh_fans_cache_forever(initial_only=True)
 
     asyncio.create_task(_refresh_fans_cache_forever())
 
