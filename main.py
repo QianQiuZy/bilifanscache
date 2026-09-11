@@ -158,8 +158,16 @@ async def _refresh_fans_cache_forever(initial_only: bool = False) -> None:
     每次请求间隔 3 秒，不再按分钟间隔批量刷新。
 
     启动阶段传入 ``initial_only=True`` 时，只补齐 Redis 中没有的房间，
-    补齐完成后返回；正常轮询则继续处理全部房间。
+    补齐完成后切换到正常轮询；正常轮询持续处理全部房间。
     """
+    warmup_only = initial_only
+    if warmup_only:
+        missing_count = sum(
+            room_id not in fans_cache_by_room
+            for room_id in rooms_meta
+        )
+        logger.info("启动补齐开始，Redis 中缺少 %s 个房间缓存", missing_count)
+
     while True:
         try:
             connector = aiohttp.TCPConnector(ssl=False)
@@ -169,7 +177,7 @@ async def _refresh_fans_cache_forever(initial_only: bool = False) -> None:
                 cookies={"SESSDATA": settings.SESSDATA}
             ) as sess:
                 for room_id, meta in rooms_meta.items():
-                    if initial_only and room_id in fans_cache_by_room:
+                    if warmup_only and room_id in fans_cache_by_room:
                         continue
                     owner_uid = int(meta["uid"])
                     room_fans = await _fetch_room_fans(sess=sess, owner_uid=owner_uid)
@@ -187,9 +195,9 @@ async def _refresh_fans_cache_forever(initial_only: bool = False) -> None:
             await asyncio.sleep(settings.REQUEST_INTERVAL_SECONDS)
             continue
 
-        if initial_only:
+        if warmup_only:
             logger.info("Redis 缺失房间补齐完成，开始正常轮询")
-            return
+            warmup_only = False
 
 
 @app.on_event("startup")
@@ -207,9 +215,7 @@ async def startup_event():
     )
     await redis_client.ping()
     await _restore_cache_from_redis()
-    await _refresh_fans_cache_forever(initial_only=True)
-
-    asyncio.create_task(_refresh_fans_cache_forever())
+    asyncio.create_task(_refresh_fans_cache_forever(initial_only=True))
 
 
 @app.on_event("shutdown")
